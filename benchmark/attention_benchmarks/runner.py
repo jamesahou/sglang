@@ -385,7 +385,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     #      block indices). Both decode and extend metadata have this mismatch.
     if backend_name == "fa4":
         from sglang.jit_kernel.flash_attention_v4 import (
-            flash_attn_with_kvcache as flash_attn_with_kvcache_fa4,
+            flash_attn_varlen_func as _fa4_varlen,
         )
         _scale = get_attention_scale(config.head_dim)
 
@@ -405,19 +405,22 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 kv_v.view(-1, config.block_size, config.num_kv_heads, config.head_dim),
             ))
 
+        _num_splits = backend.num_splits if backend.num_splits != 0 else 1
+
         def call_all_layers():
             for (q, layer), (kv_k, kv_v) in zip(zip(q_list, layers), _kv_pairs):
-                flash_attn_with_kvcache_fa4(
+                _fa4_varlen(
                     q=q.view(-1, config.num_q_heads, config.head_dim),
-                    k_cache=kv_k,
-                    v_cache=kv_v,
-                    page_table=_block_page_table,
-                    cache_seqlens=meta.cache_seqlens_int32,
+                    k=kv_k,
+                    v=kv_v,
                     cu_seqlens_q=meta.cu_seqlens_q,
+                    seqused_k=meta.cache_seqlens_int32,
                     max_seqlen_q=meta.max_seq_len_q,
+                    max_seqlen_k=meta.max_seq_len_k,
+                    page_table=_block_page_table,
                     softmax_scale=_scale,
                     causal=True,
-                    num_splits=backend.num_splits,
+                    num_splits=_num_splits,
                 )
     else:
         forward_fn = backend.forward_decode if is_decode else backend.forward_extend
