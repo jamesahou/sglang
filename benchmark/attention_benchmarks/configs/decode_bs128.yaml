@@ -1,15 +1,20 @@
-# FA4 page_size=128: test whether TMA paged-KV path improves decode throughput
-# Compared to decode_sweep.yaml (block_size=16/32/64 → paged_kv_non_tma=True),
-# block_size=128 hits the TMA path on SM100/Blackwell.
+# FA4 page_size sweep: find which block_size hits the TMA path on SM100/Blackwell.
+# paged_kv_non_tma=True for block_size ∉ {128} → non-TMA (slow batch scaling)
+# paged_kv_non_tma=False for block_size=128    → TMA (expected better scaling)
 model:
   num_layers: 4
   num_q_heads: 40
   num_kv_heads: 8
   head_dim: 128
-  block_size: 128
+  block_size: 16
 
 backends:
   - fa4
+
+model_parameter_sweep:
+  param_name: block_size
+  values: [16, 32, 64, 128]
+  label_format: "{backend}_bs{value}"
 
 batch_specs:
   # Pure decode (q_len=1)
