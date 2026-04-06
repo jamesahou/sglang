@@ -386,17 +386,32 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         )
         _scale = get_attention_scale(config.head_dim)
 
+        # init_forward_metadata stores the raw req_to_token slice as page_table
+        # (shape [batch, max_seq_len_k], values are slot indices). FA4 expects a
+        # block-level page table (shape [batch, max_blocks_per_req], values are
+        # block indices). Convert once before the timed loop.
+        meta = backend.forward_metadata
+        strided = torch.arange(
+            0, meta.max_seq_len_k, config.block_size, device=device
+        )
+        _block_page_table = meta.page_table[:, strided] // config.block_size
+
+        # Pre-view KV buffers outside the timed loop
+        _kv_pairs = []
+        for i in range(config.num_layers):
+            kv_k, kv_v = kv_pool.get_kv_buffer(i)
+            _kv_pairs.append((
+                kv_k.view(-1, config.block_size, config.num_kv_heads, config.head_dim),
+                kv_v.view(-1, config.block_size, config.num_kv_heads, config.head_dim),
+            ))
+
         def call_all_layers():
-            meta = backend.forward_metadata
-            for i, (q, layer) in enumerate(zip(q_list, layers)):
-                kv_k, kv_v = kv_pool.get_kv_buffer(i)
-                kv_k = kv_k.view(-1, config.block_size, config.num_kv_heads, config.head_dim)
-                kv_v = kv_v.view(-1, config.block_size, config.num_kv_heads, config.head_dim)
+            for (q, layer), (kv_k, kv_v) in zip(zip(q_list, layers), _kv_pairs):
                 flash_attn_with_kvcache_fa4(
                     q=q.view(-1, config.num_q_heads, config.head_dim),
                     k_cache=kv_k,
                     v_cache=kv_v,
-                    page_table=meta.page_table,
+                    page_table=_block_page_table,
                     cache_seqlens=meta.cache_seqlens_int32,
                     cu_seqlens_q=meta.cu_seqlens_q,
                     max_seqlen_q=meta.max_seq_len_q,
