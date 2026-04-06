@@ -6,8 +6,7 @@ model:
   block_size: 16
 
 backends:
-  - fa3    # sglang default (fa_impl_ver=3)
-  - fa4    # opt-in FA4 path
+  - fa4
   - trtllm
 
 batch_specs:
