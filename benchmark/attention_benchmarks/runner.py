@@ -359,10 +359,14 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     q_list = _create_input_tensors(config, total_q, device, dtype)
     layers  = [_make_layer(config, layer_id=i) for i in range(config.num_layers)]
 
-    forward_batch = _make_forward_batch(q_lens, kv_lens, req_to_token, kv_pool, device, is_decode)
-
     # --- Construct backend and initialise metadata ---
     backend_name = config.backend.lower()
+
+    # FA4 always uses forward_extend (forward_decode hardcodes FA3 which crashes
+    # on SM100).  init_forward_metadata must therefore take the extend branch,
+    # so force is_decode=False for FA4 even when q_len==1.
+    fb_is_decode = is_decode and backend_name != "fa4"
+    forward_batch = _make_forward_batch(q_lens, kv_lens, req_to_token, kv_pool, device, fb_is_decode)
 
     if backend_name in ("fa3", "fa4"):
         backend = _make_fa_backend(config, device)
@@ -375,66 +379,27 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     backend.init_forward_metadata(forward_batch)
 
-    # Workaround: Call flash_attn_with_kvcache_fa4 directly for both decode
-    # and extend paths because:
-    #   1. forward_decode uses module-level flash_attn_with_kvcache (always FA3)
-    #      regardless of fa_impl_ver — the FA3 AOT kernel crashes on SM100.
-    #   2. init_forward_metadata stores the raw req_to_token slice as page_table
-    #      (shape [batch, max_seq_len_k], values are slot indices). FA4 expects a
-    #      block-level page table (shape [batch, max_blocks_per_req], values are
-    #      block indices). Both decode and extend metadata have this mismatch.
+    # Workaround: forward_decode always uses FA3 (module-level import) regardless
+    # of fa_impl_ver, and the FA3 AOT kernel crashes on SM100.  forward_extend
+    # correctly dispatches to FA4 when fa_impl_ver=4, so use it for all FA4
+    # workloads including decode.
     if backend_name == "fa4":
-        from sglang.jit_kernel.flash_attention_v4 import (
-            flash_attn_varlen_func as _fa4_varlen,
-        )
-        _scale = get_attention_scale(config.head_dim)
-
-        # Convert slot-index page_table to block-index page_table
-        meta = backend.forward_metadata
-        strided = torch.arange(
-            0, meta.max_seq_len_k, config.block_size, device=device
-        )
-        _block_page_table = meta.page_table[:, strided] // config.block_size
-
-        # Pre-view KV buffers outside the timed loop
-        _kv_pairs = []
-        for i in range(config.num_layers):
-            kv_k, kv_v = kv_pool.get_kv_buffer(i)
-            _kv_pairs.append((
-                kv_k.view(-1, config.block_size, config.num_kv_heads, config.head_dim),
-                kv_v.view(-1, config.block_size, config.num_kv_heads, config.head_dim),
-            ))
-
-        _num_splits = backend.num_splits if backend.num_splits != 0 else 1
-
-        def call_all_layers():
-            for (q, layer), (kv_k, kv_v) in zip(zip(q_list, layers), _kv_pairs):
-                _fa4_varlen(
-                    q=q.view(-1, config.num_q_heads, config.head_dim),
-                    k=kv_k,
-                    v=kv_v,
-                    cu_seqlens_q=meta.cu_seqlens_q,
-                    seqused_k=meta.cache_seqlens_int32,
-                    max_seqlen_q=meta.max_seq_len_q,
-                    max_seqlen_k=meta.max_seq_len_k,
-                    page_table=_block_page_table,
-                    softmax_scale=_scale,
-                    causal=True,
-                    num_splits=_num_splits,
-                )
+        forward_fn = backend.forward_extend
+    elif is_decode:
+        forward_fn = backend.forward_decode
     else:
-        forward_fn = backend.forward_decode if is_decode else backend.forward_extend
+        forward_fn = backend.forward_extend
 
-        def call_all_layers():
-            for i, q in enumerate(q_list):
-                forward_fn(
-                    q=q,
-                    k=None,
-                    v=None,
-                    layer=layers[i],
-                    forward_batch=forward_batch,
-                    save_kv_cache=False,   # exclude KV write from timing
-                )
+    def call_all_layers():
+        for i, q in enumerate(q_list):
+            forward_fn(
+                q=q,
+                k=None,
+                v=None,
+                layer=layers[i],
+                forward_batch=forward_batch,
+                save_kv_cache=False,   # exclude KV write from timing
+            )
 
     times, mem_stats = _run_single_benchmark(call_all_layers, config, device)
 
