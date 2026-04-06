@@ -1,0 +1,47 @@
+# FA4 page_size=128: test whether TMA paged-KV path improves decode throughput
+# Compared to decode_sweep.yaml (block_size=16/32/64 → paged_kv_non_tma=True),
+# block_size=128 hits the TMA path on SM100/Blackwell.
+model:
+  num_layers: 4
+  num_q_heads: 40
+  num_kv_heads: 8
+  head_dim: 128
+  block_size: 128
+
+backends:
+  - fa4
+
+batch_specs:
+  # Pure decode (q_len=1)
+  - "1q1s60000"
+  - "2q1s60000"
+  - "3q1s60000"
+  - "4q1s60000"
+  - "6q1s60000"
+  - "8q1s60000"
+  - "12q1s60000"
+  - "16q1s60000"
+  - "24q1s60000"
+  - "32q1s60000"
+  - "64q1s60000"
+  - "128q1s60000"
+  # Speculative decode (q_len=4)
+  - "1q4s60000"
+  - "2q4s60000"
+  - "3q4s60000"
+  - "4q4s60000"
+  - "6q4s60000"
+  - "8q4s60000"
+  - "12q4s60000"
+  - "16q4s60000"
+  - "24q4s60000"
+  - "32q4s60000"
+  - "64q4s60000"
+  - "128q4s60000"
+
+device: "cuda:0"
+repeats: 20
+warmup_iters: 10
+
+output:
+  csv: "results_sglang_decode_bs128.csv"

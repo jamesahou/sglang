@@ -291,15 +291,23 @@ def _run_single_benchmark(
     else:
         benchmark_fn = call_all_layers
 
+    # Delimit the timed window for nsys --capture-range=cudaProfilerApi.
+    # No-op when nsys is not attached.
+    torch.cuda.cudart().cudaProfilerStart()
+
     times = []
-    for _ in range(config.repeats):
+    for i in range(config.repeats):
+        torch.cuda.nvtx.range_push(f"iter_{i}")
         start = torch.cuda.Event(enable_timing=True)
         end   = torch.cuda.Event(enable_timing=True)
         start.record()
         benchmark_fn()
         end.record()
         torch.cuda.synchronize()
+        torch.cuda.nvtx.range_pop()
         times.append(start.elapsed_time(end) / 1000.0 / config.num_layers)
+
+    torch.cuda.cudart().cudaProfilerStop()
 
     mem_stats = {}
     if config.profile_memory:
