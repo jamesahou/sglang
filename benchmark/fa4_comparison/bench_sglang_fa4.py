@@ -68,6 +68,7 @@ def main():
         context_length=4096,
         mem_fraction_static=0.9,
         cuda_graph_max_bs=NUM_SEQS,
+        enable_piecewise_cuda_graph=False,
     )
 
     input_ids, sampling_params, max_tokens_list = make_inputs(rng_seed=0)

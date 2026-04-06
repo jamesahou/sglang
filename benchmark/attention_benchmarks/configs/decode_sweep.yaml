@@ -1,0 +1,53 @@
+# Decode TPS: fixed kv_len=60000, sweep batch size
+# Pure decode: q_len=1, speculative decode: q_len=4 (accept length)
+model:
+  num_layers: 4
+  num_q_heads: 40
+  num_kv_heads: 8
+  head_dim: 128
+  block_size: 16
+
+backends:
+  - fa3    # sglang default (fa_impl_ver=3)
+  - fa4    # opt-in FA4 path
+  - trtllm
+
+batch_specs:
+  # Pure decode (q_len=1)
+  - "1q1s60000"
+  - "2q1s60000"
+  - "3q1s60000"
+  - "4q1s60000"
+  - "6q1s60000"
+  - "8q1s60000"
+  - "12q1s60000"
+  - "16q1s60000"
+  - "24q1s60000"
+  - "32q1s60000"
+  - "64q1s60000"
+  - "128q1s60000"
+  # Speculative decode (q_len=4, accept_length=4)
+  - "1q4s60000"
+  - "2q4s60000"
+  - "3q4s60000"
+  - "4q4s60000"
+  - "6q4s60000"
+  - "8q4s60000"
+  - "12q4s60000"
+  - "16q4s60000"
+  - "24q4s60000"
+  - "32q4s60000"
+  - "64q4s60000"
+  - "128q4s60000"
+
+model_parameter_sweep:
+  param_name: block_size
+  values: [16, 32, 64]
+  label_format: "{backend}_bs{value}"
+
+device: "cuda:0"
+repeats: 20
+warmup_iters: 10
+
+output:
+  csv: "results_sglang_decode_sweep.csv"
