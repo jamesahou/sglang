@@ -375,21 +375,21 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     backend.init_forward_metadata(forward_batch)
 
-    # Workaround: FlashAttentionBackend.forward_decode uses the module-level
-    # flash_attn_with_kvcache (always FA3) regardless of fa_impl_ver — the
-    # per-impl dispatch only exists in forward_extend.  On Blackwell (SM100)
-    # the FA3 AOT kernel crashes.  Call flash_attn_with_kvcache_fa4 directly
-    # for the decode path to match what forward_extend does for fa_impl_ver=4.
-    if backend_name == "fa4" and is_decode:
+    # Workaround: Call flash_attn_with_kvcache_fa4 directly for both decode
+    # and extend paths because:
+    #   1. forward_decode uses module-level flash_attn_with_kvcache (always FA3)
+    #      regardless of fa_impl_ver — the FA3 AOT kernel crashes on SM100.
+    #   2. init_forward_metadata stores the raw req_to_token slice as page_table
+    #      (shape [batch, max_seq_len_k], values are slot indices). FA4 expects a
+    #      block-level page table (shape [batch, max_blocks_per_req], values are
+    #      block indices). Both decode and extend metadata have this mismatch.
+    if backend_name == "fa4":
         from sglang.jit_kernel.flash_attention_v4 import (
             flash_attn_with_kvcache as flash_attn_with_kvcache_fa4,
         )
         _scale = get_attention_scale(config.head_dim)
 
-        # init_forward_metadata stores the raw req_to_token slice as page_table
-        # (shape [batch, max_seq_len_k], values are slot indices). FA4 expects a
-        # block-level page table (shape [batch, max_blocks_per_req], values are
-        # block indices). Convert once before the timed loop.
+        # Convert slot-index page_table to block-index page_table
         meta = backend.forward_metadata
         strided = torch.arange(
             0, meta.max_seq_len_k, config.block_size, device=device
