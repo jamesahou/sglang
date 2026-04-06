@@ -367,18 +367,48 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     backend.init_forward_metadata(forward_batch)
 
-    forward_fn = backend.forward_decode if is_decode else backend.forward_extend
+    # Workaround: FlashAttentionBackend.forward_decode uses the module-level
+    # flash_attn_with_kvcache (always FA3) regardless of fa_impl_ver — the
+    # per-impl dispatch only exists in forward_extend.  On Blackwell (SM100)
+    # the FA3 AOT kernel crashes.  Call flash_attn_with_kvcache_fa4 directly
+    # for the decode path to match what forward_extend does for fa_impl_ver=4.
+    if backend_name == "fa4" and is_decode:
+        from sglang.jit_kernel.flash_attention_v4 import (
+            flash_attn_with_kvcache as flash_attn_with_kvcache_fa4,
+        )
+        _scale = get_attention_scale(config.head_dim)
 
-    def call_all_layers():
-        for i, q in enumerate(q_list):
-            forward_fn(
-                q=q,
-                k=None,
-                v=None,
-                layer=layers[i],
-                forward_batch=forward_batch,
-                save_kv_cache=False,   # exclude KV write from timing
-            )
+        def call_all_layers():
+            meta = backend.forward_metadata
+            for i, (q, layer) in enumerate(zip(q_list, layers)):
+                kv_k, kv_v = kv_pool.get_kv_buffer(i)
+                kv_k = kv_k.view(-1, config.block_size, config.num_kv_heads, config.head_dim)
+                kv_v = kv_v.view(-1, config.block_size, config.num_kv_heads, config.head_dim)
+                flash_attn_with_kvcache_fa4(
+                    q=q.view(-1, config.num_q_heads, config.head_dim),
+                    k_cache=kv_k,
+                    v_cache=kv_v,
+                    page_table=meta.page_table,
+                    cache_seqlens=meta.cache_seqlens_int32,
+                    cu_seqlens_q=meta.cu_seqlens_q,
+                    max_seqlen_q=meta.max_seq_len_q,
+                    softmax_scale=_scale,
+                    causal=True,
+                    num_splits=backend.num_splits,
+                )
+    else:
+        forward_fn = backend.forward_decode if is_decode else backend.forward_extend
+
+        def call_all_layers():
+            for i, q in enumerate(q_list):
+                forward_fn(
+                    q=q,
+                    k=None,
+                    v=None,
+                    layer=layers[i],
+                    forward_batch=forward_batch,
+                    save_kv_cache=False,   # exclude KV write from timing
+                )
 
     times, mem_stats = _run_single_benchmark(call_all_layers, config, device)
 
