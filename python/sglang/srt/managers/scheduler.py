@@ -34,6 +34,7 @@ import setproctitle
 import torch
 import torch.distributed
 import zmq
+import torch.cuda.nvtx as nvtx
 from torch.cuda import Stream as CudaStream
 from torch.distributed import barrier
 
@@ -1303,21 +1304,37 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
+            nvtx.range_push("normal_loop")
+
             # Receive requests
+            nvtx.range_push("recv_requests")
             recv_reqs = self.recv_requests()
+            nvtx.range_pop()
+
+            nvtx.range_push("process_input_requests")
             self.process_input_requests(recv_reqs)
+            nvtx.range_pop()
+
             if self._engine_paused:
                 self.cancel_bubble_timer()
+                nvtx.range_pop()  # normal_loop
                 continue
 
             # Get the next batch to run
+            nvtx.range_push("get_next_batch_to_run")
             batch = self.get_next_batch_to_run()
+            nvtx.range_pop()
             self.cur_batch = batch
 
             # Launch the current batch
             if batch:
+                nvtx.range_push("run_batch")
                 result = self.run_batch(batch)
+                nvtx.range_pop()
+
+                nvtx.range_push("process_batch_result")
                 self.process_batch_result(batch, result)
+                nvtx.range_pop()
             else:
                 # When the server is idle, do self-check and re-init some states.
                 self.self_check_during_idle()
@@ -1326,6 +1343,8 @@ class Scheduler(
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+            nvtx.range_pop()  # normal_loop
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -1336,18 +1355,31 @@ class Scheduler(
 
         def pop_and_process():
             # Process the results of the last batch
+            nvtx.range_push("process_batch_result")
             tmp_batch, tmp_result = self.result_queue.popleft()
             self.process_batch_result(tmp_batch, tmp_result)
+            nvtx.range_pop()
 
         while True:
+            nvtx.range_push("overlap_loop")
+
             # Receive requests
+            nvtx.range_push("recv_requests")
             recv_reqs = self.recv_requests()
+            nvtx.range_pop()
+
+            nvtx.range_push("process_input_requests")
             self.process_input_requests(recv_reqs)
+            nvtx.range_pop()
+
             if self._engine_paused:
+                nvtx.range_pop()  # overlap_loop
                 continue
 
             # Get the next batch to run
+            nvtx.range_push("get_next_batch_to_run")
             batch = self.get_next_batch_to_run()
+            nvtx.range_pop()
             self.cur_batch = batch
             disable_overlap_for_batch = self.is_disable_overlap_for_batch(batch)
 
@@ -1358,7 +1390,9 @@ class Scheduler(
 
             # Launch the current batch
             if batch:
+                nvtx.range_push("run_batch")
                 batch_result = self.run_batch(batch)
+                nvtx.range_pop()
                 self.result_queue.append((batch.copy(), batch_result))
             else:
                 batch_result = None
@@ -1375,12 +1409,16 @@ class Scheduler(
             # Run sample of the current batch
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
             if self.is_generation:
+                nvtx.range_push("launch_batch_sample")
                 self.launch_batch_sample_if_needed(batch_result)
+                nvtx.range_pop()
 
             # Update last_batch
             self.last_batch = batch
             if envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get():
                 self.self_check_during_busy()
+
+            nvtx.range_pop()  # overlap_loop
 
     def is_disable_overlap_for_batch(self, batch: ScheduleBatch) -> bool:
         # For two consecutive prefill batches, we disable overlap to improve the TTFT of the first batch.
@@ -1436,6 +1474,7 @@ class Scheduler(
             if self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
                 recv_reqs = []
 
+                nvtx.range_push("zmq_recv_tokenizer")
                 while True:
                     try:
                         if self.recv_limit_reached(len(recv_reqs)):
@@ -1444,7 +1483,9 @@ class Scheduler(
                     except zmq.ZMQError:
                         break
                     recv_reqs.append(recv_req)
+                nvtx.range_pop()
 
+                nvtx.range_push("zmq_recv_rpc")
                 while True:
                     try:
                         if self.recv_limit_reached(len(recv_reqs)):
@@ -1453,6 +1494,7 @@ class Scheduler(
                     except zmq.ZMQError:
                         break
                     recv_reqs.append(recv_rpc)
+                nvtx.range_pop()
             else:
                 recv_reqs = None
         else:

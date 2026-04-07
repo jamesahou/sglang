@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
+import torch.cuda.nvtx as nvtx
 import torch.distributed as dist
 from torch import nn
 
@@ -2731,6 +2732,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         split_forward_count: int = 1,
     ) -> ModelRunnerOutput:
         self.forward_pass_id += 1
+        mode = forward_batch.forward_mode
+        nvtx.range_push(f"model_runner.forward({mode}, bs={forward_batch.batch_size})")
 
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
@@ -2779,6 +2782,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if dumper.may_enable:
             dumper.step()
 
+        nvtx.range_pop()  # model_runner.forward
         return output
 
     def _forward_raw(
@@ -2801,11 +2805,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
         if can_run_graph:
+            nvtx.range_push("cuda_graph_replay")
             ret = self.graph_runner.replay(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            nvtx.range_pop()
             return ModelRunnerOutput(logits_output=ret, can_run_graph=can_run_graph)
 
         # For MLP sync
@@ -2834,23 +2840,29 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             self.hisparse_coordinator.num_real_reqs.fill_(forward_batch.batch_size)
 
         if forward_batch.forward_mode.is_decode():
+            nvtx.range_push("forward_decode")
             ret = self.forward_decode(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            nvtx.range_pop()
         elif forward_batch.forward_mode.is_split_prefill():
+            nvtx.range_push("forward_split_prefill")
             ret = self.forward_split_prefill(
                 forward_batch,
                 reinit_attn_backend=reinit_attn_backend,
                 forward_count=split_forward_count,
             )
+            nvtx.range_pop()
         elif forward_batch.forward_mode.is_extend(include_draft_extend_v2=True):
+            nvtx.range_push("forward_extend")
             ret, can_run_graph = self.forward_extend(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            nvtx.range_pop()
         elif forward_batch.forward_mode.is_idle():
             ret = self.forward_idle(forward_batch, pp_proxy_tensors=pp_proxy_tensors)
         else:

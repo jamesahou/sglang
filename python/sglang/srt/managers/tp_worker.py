@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
+import torch.cuda.nvtx as nvtx
 
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.managers.io_struct import (
@@ -466,11 +467,13 @@ class TpModelWorker(BaseTpWorker):
             return self._forward_batch_generation_dllm(forward_batch)
 
         if self.pp_group.is_last_rank:
+            nvtx.range_push("model_runner.forward")
             out = self.model_runner.forward(
                 forward_batch,
                 pp_proxy_tensors=pp_proxy_tensors,
                 skip_attn_backend_init=skip_attn_backend_init,
             )
+            nvtx.range_pop()
             logits_output, can_run_cuda_graph = out.logits_output, out.can_run_graph
             batch_result = GenerationBatchResult(
                 logits_output=logits_output,
@@ -489,9 +492,11 @@ class TpModelWorker(BaseTpWorker):
             ):
 
                 def sample_batch_func():
+                    nvtx.range_push("sample_delayed")
                     batch_result.next_token_ids = self.model_runner.sample(
                         logits_output, forward_batch
                     )
+                    nvtx.range_pop()
                     return batch_result
 
                 batch_result.delay_sample_func = sample_batch_func
@@ -499,9 +504,11 @@ class TpModelWorker(BaseTpWorker):
 
             if not model_worker_batch.is_prefill_only:
                 # For normal requests, sample the next token ids.
+                nvtx.range_push("sample")
                 batch_result.next_token_ids = self.model_runner.sample(
                     logits_output, forward_batch
                 )
+                nvtx.range_pop()
             else:
                 # For prefill-only requests, create dummy token IDs on CPU
                 # The size should match the batch size (number of sequences), not total tokens
