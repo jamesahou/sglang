@@ -1,0 +1,26 @@
+model:
+  num_layers: 4
+  num_q_heads: 40
+  num_kv_heads: 8
+  head_dim: 128
+  block_size: 16
+
+backends:
+  - fa4
+  - trtllm
+
+batch_specs:
+  - "q1k"      # 1024 tokens
+  - "q2k"      # 2048 tokens
+  - "q4k"      # 4096 tokens
+  - "q8k"      # 8192 tokens
+  - "q16k"     # 16384 tokens
+  - "q32k"     # 32768 tokens
+  - "q60000"   # 60000 tokens
+
+device: "cuda:0"
+repeats: 20
+warmup_iters: 10
+
+output:
+  csv: "results_sglang_prefill_sweep.csv"
